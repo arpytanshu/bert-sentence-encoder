@@ -7,7 +7,11 @@ Created on Mon Jan 27 01:17:07 2020
 """
 
      
+import sys
+import time
 import torch
+import numpy as np
+from tqdm import tqdm, trange
 from transformers import BertModel, BertTokenizer, BertConfig
 
 
@@ -26,7 +30,7 @@ class BertSentenceEncoder():
         self.model_name =   model_name
         self.config =       BertConfig.from_pretrained(self.model_name, output_hidden_states=True, training=False)
         self.model =        BertModel.from_pretrained(self.model_name, config=self.config)
-        self.tokenizer =    BertTokenizer.from_pretrained(self.model_name)
+        self.tokenizer =    BertTokenizer.from_pretrained(self.model_name, do_lower_case=False)
         self.pooling_methods = ['max', 'mean', 'max-mean']
         self.model.eval()
     
@@ -67,67 +71,65 @@ class BertSentenceEncoder():
         assert (pooling_method in self.pooling_methods), \
             "pooling methods needs to be one of 'max', 'mean' or 'max-mean'"
             
-        pooled = []
-        if pooling_method == 'max':         pool_fn = self._max_pooler
+        if pooling_method   == 'max':       pool_fn = self._max_pooler
         elif pooling_method == 'mean':      pool_fn = self._mean_pooler
         elif pooling_method == 'max-mean':  pool_fn = self._max_mean_pooler
         
-        for encoded in encodings :       
-            pooled.append(pool_fn(encoded).squeeze_())
+        pooled = pool_fn(encodings)
         
-        return torch.stack(pooled)
+        return pooled
     
-    def encoder(self, sentences, layer=-2, pooling_method = None ):
-        '''
-        Get the BERT embeddings for the sentence/s from
-        the hidden layer specified in the layer parameter.
-        Parameters
-        ----------
-        sentence : list of string
-            list of string to be encoded.
-            length of list is the batch_size
-            
-        layer : int
-            the layer from which to get the encoding.
-            -1 = last layer
-            -2 = second last layer
-            ...
-            default = -2
-            BERT is a model pretrained with a bi-partite target:
-                masked language model and next sentence prediction.
-            The last layer is trained in the way to fit this target,
-            making it too “biased” to those two targets. For the sake
-            of generalization, we could simply take the second-to-last layer
-            and do the pooling.
-            
-        pooling_method : one of 'max', 'mean' or 'max-mean'
-            if None, returns the word embeddings without any pooling.
-            
-        Returns
-        -------
-        if pooling_method is None, returns a list of tensors of shape
-        (sequence_length x hidden_size). [one tensor for each sentence]
-        which are the word embeddings for the sentence without pooling.
-        
-        if pooling_method is specified, returns a list of tensor,
-        one tensor of shape (hidden_size) for each sentence.
-        
-        '''
-        
+
+    
+    def encoder(self, sentences, layer=-2, pooling_method = None, max_length=40 ):
+     
         assert isinstance(sentences, list), \
             "parameter 'sentences' is supposed to be a list of string/s"
         assert all(isinstance(x, str) for x in sentences), \
             "parameter 'sentences' must contain strings only"
         
-        encodings = []
+        '''
+        model(input_tokens) returns a tuple of 3 elements.
+        out[0] : last_hidden_state  of shape [ B x T x D ]
+        out[1] : pooler_output      of shape [ B x D ]
+        out[2] : hidden_states      13 tuples, one for each hidden layer
+                                    each tuple of shape [ B x T x D ]        
+        '''
         with torch.no_grad():
-            for sentence in sentences:
-                input_id = self.tokenizer.encode(sentence, return_tensors='pt')
-                encoded = self.model(input_id)
-                encodings.append(encoded[2][layer])
-            
+            input_ids = self.tokenizer.batch_encode_plus(sentences, return_tensors='pt', max_length=max_length)['input_ids']
+            encoded = self.model(input_ids)
+                    
         if pooling_method in self.pooling_methods:
-            pooled = self._pooler(encodings, pooling_method)
+            pooled = self._pooler(encoded[2][layer], pooling_method)
             return pooled
         
-        return encodings
+        return encoded
+
+
+def get_BE_batched(sentences, batch_size, BE=None):
+    assert(BE), "Provide a BertSentenceEncoder object."
+    l = len(sentences)
+    embeddings = np.empty((0,768))    
+    num_batches = int(l/batch_size) if l%batch_size==0 else int(l/batch_size)+1
+    
+    t = trange(num_batches, desc='Batch', leave=True)
+
+    for i in t:
+        # get start and end index for this batch
+        if( i != int(l/batch_size) ):
+            start   = (i*batch_size)
+            end     = (i*batch_size)+batch_size   
+        else:
+            start   = int(l/batch_size)*batch_size
+            end     = l
+        t.set_description('Embedding batch => {} : {}'.format(start, end))
+    
+        # s = time.time()
+        batch_embeddings = BE.encoder(sentences[start:end], layer = -2, pooling_method='mean')
+        # e = time.time()    
+        # print("Time elapsed: {} seconds.".format(e-s), file=sys.stderr)
+        
+        embeddings = np.append(embeddings, batch_embeddings, axis=0)
+        
+    return embeddings
+    
