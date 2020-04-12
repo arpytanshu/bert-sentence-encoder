@@ -6,12 +6,10 @@ Created on Mon Jan 27 01:17:07 2020
 @author: ansh
 """
 
-     
-import sys
 import time
 import torch
 import numpy as np
-from tqdm import tqdm, trange
+from tqdm import  trange
 from transformers import BertModel, BertTokenizer, BertConfig
 
 
@@ -32,8 +30,13 @@ class BertSentenceEncoder():
         self.model =        BertModel.from_pretrained(self.model_name, config=self.config)
         self.tokenizer =    BertTokenizer.from_pretrained(self.model_name, do_lower_case=False)
         self.pooling_methods = ['max', 'mean', 'max-mean']
-        self.model.eval()
-    
+        self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+        # freeze parameters
+        self.model.requires_grad_(False)        
+        # move model to gpu , if one available:
+        if torch.cuda.is_available():
+            self.model.cuda()
+            
     def __repr__(self):
         return 'BertSentenceEncoder model:{}'.format(self.model_name)
     
@@ -96,7 +99,8 @@ class BertSentenceEncoder():
                                     each tuple of shape [ B x T x D ]        
         '''
         with torch.no_grad():
-            input_ids = self.tokenizer.batch_encode_plus(sentences, return_tensors='pt', max_length=max_length)['input_ids']
+            input_ids = self.tokenizer.batch_encode_plus(sentences, return_tensors='pt', max_length=max_length, pad_to_max_length=True)['input_ids']
+            input_ids = input_ids.to(self.device)
             encoded = self.model(input_ids)
                     
         if pooling_method in self.pooling_methods:
@@ -124,12 +128,11 @@ def get_BE_batched(sentences, batch_size, BE=None):
             end     = l
         t.set_description('Embedding batch => {} : {}'.format(start, end))
     
-        # s = time.time()
+        s = time.time()
         batch_embeddings = BE.encoder(sentences[start:end], layer = -2, pooling_method='mean')
-        # e = time.time()    
-        # print("Time elapsed: {} seconds.".format(e-s), file=sys.stderr)
-        
+        e = time.time()    
+        print("Time elapsed: {} seconds.".format(e-s))
+        batch_embeddings = batch_embeddings.cpu().numpy()
         embeddings = np.append(embeddings, batch_embeddings, axis=0)
         
     return embeddings
-    
